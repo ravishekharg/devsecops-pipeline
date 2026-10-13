@@ -16,7 +16,7 @@ flaw() {  # flaw <case> <dir>: introduce the flaw for this case
   local d=$2
   case $1 in
     secret)      # a GitHub token committed to config (generated now, so no real-looking token is ever in this repo)
-      printf 'GITHUB_TOKEN = "ghp_%s"\n' "$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 36)" > "$d/app/settings.py" ;;
+      printf 'GITHUB_TOKEN = "ghp_%s"\n' "$(head -c 400 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 36)" > "$d/app/settings.py" ;;
     sast)        # SQL built with an f-string: injection
       sed -i "s|conn.execute(\"SELECT id, owner, body FROM notes WHERE owner = ? ORDER BY id\", (owner,))|conn.execute(f\"SELECT id, owner, body FROM notes WHERE owner = '{owner}' ORDER BY id\")|" "$d/app/main.py" ;;
     deps)        # a dependency with known CVEs (requests 2.19.1: CVE-2018-18074, CVE-2023-32681)
@@ -39,6 +39,14 @@ gates() {  # gates <case>: the stage(s) that must fail
   esac
 }
 
+evidence() {  # evidence <case>: what the gate's output must contain
+  case $1 in
+    secret) echo 'leaks found: [1-9]' ;; sast) echo 'sql-built-from-strings|[1-9][0-9]* findings?\.' ;; deps) echo 'CVE-2018-18074|CVE-2023-32681' ;;
+    dockerfile) echo 'DL3007|DL3002' ;; manifest) echo 'privilege|privileged|run-as-non-root' ;;
+    image) echo 'Total: [0-9]+ \(HIGH: [0-9]+, CRITICAL' ;; dast) echo 'FAIL-NEW: [A-Za-z]' ;;
+  esac
+}
+
 for c in $CASES; do
   d=$(mktemp -d)
   git -c safe.directory='*' clone -q "$SRC" "$d/repo" && d="$d/repo"
@@ -46,15 +54,19 @@ for c in $CASES; do
   flaw "$c" "$d"
   git -C "$d" add -A && git -C "$d" -c user.name=demo -c user.email=demo@example.com commit -qm "flaw: $c"
   if git -C "$d" diff --quiet HEAD~1 HEAD; then RESULTS+=("ERROR $c: the flaw didn't apply"); continue; fi
-  stages=($(gates "$c")); last=${stages[-1]}; caught=0
+  stages=($(gates "$c")); last=${stages[-1]}; failed_at=""
   for s in "${stages[@]}"; do
-    if ! SKIP_TESTS=1 IMAGE="notes-api:flaw-$c" OUT="$d/reports" "$d/ci/$s.sh" > "$d/gate.log" 2>&1; then
-      [ "$s" = "$last" ] && caught=1
-      break
+    if ! SKIP_TESTS=1 IMAGE="notes-api:flaw-$c" OUT="$d/reports" bash "$d/ci/$s.sh" > "$d/gate.log" 2>&1; then
+      failed_at=$s; break
     fi
   done
-  if [ $caught = 1 ]; then
-    RESULTS+=("CAUGHT  $c  by $last: $(grep -m1 -E "$(case $c in secret) echo 'leaks found|Finding' ;; sast) echo '[0-9]+ findings?' ;; deps) echo 'CVE-[0-9-]+' ;; dockerfile) echo 'DL[0-9]+' ;; manifest) echo 'check: |privileged' ;; image) echo 'Total: [0-9]+ \(HIGH' ;; dast) echo 'FAIL-NEW: [A-Za-z]' ;; esac)" "$d/gate.log" | sed 's/\x1b\[[0-9;]*m//g' | tr -s ' ' | cut -c1-120)")
+  # Caught = the expected gate failed AND its output names the flaw. A gate that fails for any
+  # other reason (crash, network, permissions) must not count as catching anything.
+  evidence=$(grep -m1 -E "$(evidence "$c")" "$d/gate.log" | sed 's/\x1b\[[0-9;]*m//g' | tr -s ' ' | cut -c1-120)
+  if [ "$failed_at" = "$last" ] && [ -n "$evidence" ]; then
+    RESULTS+=("CAUGHT  $c  by $last: $evidence")
+  elif [ -n "$failed_at" ]; then
+    RESULTS+=("ERROR   $c: $failed_at failed without the expected finding"); tail -20 "$d/gate.log"
   else
     RESULTS+=("MISSED  $c: $last passed with the flaw in place"); tail -20 "$d/gate.log"
   fi
