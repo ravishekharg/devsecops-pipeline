@@ -1,0 +1,10 @@
+# kube-linter's default checks plus a few opt-in ones.
+checks:
+  include:
+    - latest-tag
+    - privilege-escalation-container
+    - sensitive-host-mounts
+    - host-network
+    - host-pid
+    - host-ipc
+    - drop-net-raw-capability

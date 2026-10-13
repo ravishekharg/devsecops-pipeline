@@ -1,0 +1,108 @@
+# notes-api, hardened: Pod Security "restricted" on the namespace, non-root, read-only root FS,
+# no capabilities, no service-account token, default-deny networking, requests and limits.
+# The API token comes from a Secret created at deploy time (never committed).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: notes
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: notes-api
+  namespace: notes
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notes-api
+  namespace: notes
+  labels: {app: notes-api}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: notes-api}
+  template:
+    metadata:
+      labels: {app: notes-api}
+    spec:
+      serviceAccountName: notes-api
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: {app: notes-api}
+      containers:
+        - name: notes-api
+          image: registry.example/notes-api:0.1.0   # replaced with the signed digest at deploy time
+          ports:
+            - {name: http, containerPort: 8000}
+          env:
+            - name: API_TOKEN
+              valueFrom:
+                secretKeyRef: {name: notes-api, key: token}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 128Mi}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notes-api
+  namespace: notes
+spec:
+  selector: {app: notes-api}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: notes-api
+  namespace: notes
+spec:
+  podSelector:
+    matchLabels: {app: notes-api}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - {port: 8000}
+  egress: []
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: notes-api
+  namespace: notes
+spec:
+  minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow   # a crash-looping pod must not block node drains
+  selector:
+    matchLabels: {app: notes-api}

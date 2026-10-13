@@ -1,0 +1,55 @@
+# Admission control for the notes namespace (Kyverno). The pipeline's guarantees mean nothing if
+# someone can `kubectl apply` an image that never went through it, so the cluster checks:
+#   1. images come from our registry, nowhere else
+#   2. the image is signed with the pipeline's key AND carries a signed CycloneDX SBOM attestation
+#   3. tags are resolved to the verified digest (mutateDigest), so the tag can't be re-pointed later
+# REGISTRY and the public key are filled in at install time (ci/95-sign-and-admit.sh).
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: notes-supply-chain
+spec:
+  background: false
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: only-our-registry
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [notes]
+      validate:
+        failureAction: Enforce
+        message: "Images in the notes namespace must come from REGISTRY/notes-api."
+        pattern:
+          spec:
+            containers:
+              - image: "REGISTRY/notes-api*"
+    - name: signed-with-sbom
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [notes]
+      verifyImages:
+        - imageReferences: ["REGISTRY/notes-api*"]
+          failureAction: Enforce
+          mutateDigest: true
+          verifyDigest: true
+          required: true
+          attestors:
+            - entries:
+                - keys:
+                    publicKeys: |-
+                      PUBLIC_KEY
+                    rekor: {ignoreTlog: true}   # key-based signing in a private registry, no public log
+                    ctlog: {ignoreSCT: true}
+          attestations:
+            - type: https://cyclonedx.org/bom
+              attestors:
+                - entries:
+                    - keys:
+                        publicKeys: |-
+                          PUBLIC_KEY
+                        rekor: {ignoreTlog: true}
+                        ctlog: {ignoreSCT: true}

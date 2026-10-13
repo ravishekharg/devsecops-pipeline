@@ -1,0 +1,124 @@
+# The same stage scripts as the Jenkinsfile (ci/*.sh), plus what only a hosted runner can do here:
+# the admission test in a kind cluster, SARIF into GitHub code scanning, and on main a keyless
+# (Sigstore/OIDC) signature, SBOM attestation and SLSA build provenance on the published image.
+# Third-party actions are pinned to commit SHAs (a tag can be moved; a commit can't).
+name: pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # upload SARIF
+      packages: write          # push to GHCR (main only)
+      id-token: write          # keyless signing (main only)
+      attestations: write      # build provenance (main only)
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0   # gitleaks scans the whole history
+
+      - name: security gates (secrets, SAST, dependencies, Dockerfile, manifests, tests, image, SBOM, DAST)
+        run: bash ci/run-all.sh
+
+      - name: sign, attest SBOM, and prove admission control (kind + Kyverno)
+        run: bash ci/95-sign-and-admit.sh
+
+      - name: semgrep findings into GitHub code scanning
+        if: always() && hashFiles('reports/semgrep.sarif') != ''
+        uses: github/codeql-action/upload-sarif@48ab28a6f5dbc2a99bf1e0131198dd8f1df78169 # v3.28.0
+        with:
+          sarif_file: reports/semgrep.sarif
+          category: semgrep
+
+      - name: gitleaks findings into GitHub code scanning
+        if: always() && hashFiles('reports/gitleaks.sarif') != ''
+        uses: github/codeql-action/upload-sarif@48ab28a6f5dbc2a99bf1e0131198dd8f1df78169 # v3.28.0
+        with:
+          sarif_file: reports/gitleaks.sarif
+          category: gitleaks
+
+      - name: reports
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: reports
+          path: |
+            reports/*.sarif
+            reports/sbom.*.json
+            reports/zap/zap.html
+            reports/zap/zap.json
+            reports/policy.yaml
+
+      # --- main only: publish the image that was just scanned, signed keylessly -----------
+      - name: log in to GHCR
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: push
+        if: github.ref == 'refs/heads/main'
+        id: push
+        run: |
+          ref=ghcr.io/${{ github.repository_owner }}/notes-api
+          docker tag notes-api:ci "$ref:${GITHUB_SHA::12}"
+          docker push -q "$ref:${GITHUB_SHA::12}"
+          digest=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ref:${GITHUB_SHA::12}" | grep "^$ref@" | cut -d@ -f2)
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"; echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        if: github.ref == 'refs/heads/main'
+        with:
+          cosign-release: v2.4.1
+
+      - name: keyless signature and SBOM attestation (identity = this workflow on main)
+        if: github.ref == 'refs/heads/main'
+        env:
+          REF: ${{ steps.push.outputs.ref }}@${{ steps.push.outputs.digest }}
+        run: |
+          cosign sign --yes "$REF"
+          cosign attest --yes --type cyclonedx --predicate reports/sbom.cdx.json "$REF"
+
+      - name: SLSA build provenance
+        if: github.ref == 'refs/heads/main'
+        uses: actions/attest-build-provenance@7668571508540a607bdfd90a87a560489fe372eb # v2.1.0
+        with:
+          subject-name: ${{ steps.push.outputs.ref }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: verify as a consumer would
+        if: github.ref == 'refs/heads/main'
+        env:
+          REF: ${{ steps.push.outputs.ref }}@${{ steps.push.outputs.digest }}
+        run: |
+          id="https://github.com/${{ github.workflow_ref }}"
+          cosign verify "$REF" --certificate-identity "$id" --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          cosign verify-attestation "$REF" --type cyclonedx --certificate-identity "$id" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          echo "verified: signed by $id"
+
+  gates-catch-flaws:
+    # A green pipeline only means something if it goes red on real problems: seed one typical
+    # flaw per gate and require that gate to fail.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - run: bash demo/break-it.sh

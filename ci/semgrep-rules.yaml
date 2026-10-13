@@ -1,0 +1,22 @@
+# Project rules on top of the public packs. Written after a seeded test showed the public
+# p/python pack doesn't flag an f-string SQL query passed to sqlite3's execute().
+rules:
+  - id: sql-built-from-strings
+    languages: [python]
+    severity: ERROR
+    message: >-
+      SQL built by string formatting or concatenation is an injection risk.
+      Pass values as parameters: execute("... WHERE owner = ?", (owner,))
+    metadata:
+      cwe: "CWE-89: SQL Injection"
+      owasp: "A03:2021 - Injection"
+    patterns:
+      - pattern-either:
+          - pattern: $DB.$EXEC(f"...", ...)
+          - pattern: $DB.$EXEC("..." % $X, ...)
+          - pattern: $DB.$EXEC("...".format(...), ...)
+          - pattern: $DB.$EXEC("..." + $X, ...)
+          - pattern: $DB.$EXEC($X + "...", ...)
+      - metavariable-regex:
+          metavariable: $EXEC
+          regex: ^(execute|executemany|executescript|raw)$
