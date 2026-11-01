@@ -1,0 +1,87 @@
+# Daily re-scan of the image that was shipped, from its signed SBOM (ci/96-rescan.sh). A finding opens an issue, or
+# updates the open one, so a new CVE in a released image becomes work instead of a surprise.
+name: rescan
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [ci/96-rescan.sh, .github/workflows/rescan.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    # the re-scan must go red on a known-vulnerable SBOM, or a green re-scan means nothing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: SBOM of an old base image (python 3.12.0, 2023)
+        run: |
+          source ci/tools.env
+          mkdir -p reports
+          docker run --rm --user 0 -v "$PWD/reports:/out" "$SYFT" registry:python:3.12.0-slim -q -o cyclonedx-json=/out/old.cdx.json
+      - name: re-scan must find fixable HIGH/CRITICAL CVEs
+        run: |
+          if SBOM_FILE=reports/old.cdx.json bash ci/96-rescan.sh > /dev/null; then
+            echo "FAIL: no findings on a known-vulnerable SBOM"; exit 1
+          fi
+          n=$(jq '[.Results[]?.Vulnerabilities[]?] | length' reports/rescan.json)
+          echo "PASS: $n fixable HIGH/CRITICAL vulnerabilities found in the old SBOM" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$n" -gt 0 ]
+
+  shipped-image:
+    runs-on: ubuntu-latest
+    needs: self-test
+    permissions:
+      contents: read
+      packages: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 50 }
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: v2.4.1
+      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: newest image published from main
+        id: ref
+        run: |
+          # images are tagged with the 12-character commit; walk back to the newest commit that has one
+          repo=ghcr.io/${{ github.repository_owner }}/notes-api
+          for sha in $(git log --format=%H -n 50 origin/main); do
+            if docker buildx imagetools inspect "$repo:${sha::12}" > /dev/null 2>&1; then
+              echo "ref=$repo:${sha::12}" >> "$GITHUB_OUTPUT"; echo "image: $repo:${sha::12}"; exit 0
+            fi
+          done
+          echo "no published image found in the last 50 commits"; exit 1
+      - name: verify the SBOM attestation and re-scan it
+        id: scan
+        env:
+          REF: ${{ steps.ref.outputs.ref }}
+          IDENTITY_REGEXP: "^https://github.com/${{ github.repository }}/.github/workflows/pipeline.yml@refs/heads/main$"
+        run: |
+          set +e
+          bash ci/96-rescan.sh
+          rc=$?
+          cat reports/rescan.md >> "$GITHUB_STEP_SUMMARY"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit $rc
+      - name: open or update the issue
+        if: failure() && steps.scan.outputs.rc == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="New fixable CVEs in the shipped image"
+          num=$(gh issue list --state open --search "\"$title\" in:title" --json number -q '.[0].number')
+          body="$(cat reports/rescan.md)
+
+          Found by the daily re-scan (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). Fix: bump the base image or the dependency, let the pipeline rebuild, sign and publish."
+          if [ -n "$num" ]; then gh issue edit "$num" --body "$body"; else gh issue create --title "$title" --body "$body"; fi

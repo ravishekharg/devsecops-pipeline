@@ -38,6 +38,17 @@ Every stage works on one image built once (`IMAGE`). The SBOM is generated from 
 signature is over its digest, and the cluster pins the digest at admission. Rebuilding in a later
 job "to push it" would produce a different digest that no scanner has seen.
 
+## Continuous re-scanning (`ci/96-rescan.sh`, `rescan.yml`)
+A release that passed every gate can be vulnerable a week later: CVEs are published after the fact.
+Every day the re-scan takes the newest image published from `main` and **verifies its SBOM
+attestation**. Only an SBOM signed keylessly by this repository's pipeline on `main` is trusted; an
+unsigned or foreign SBOM is refused (exit 2). It then scans that SBOM with the pinned Trivy against
+today's database. Fixable HIGH/CRITICAL findings open an issue, or update the open one.
+
+Scanning the SBOM rather than the image means no pull and no rebuild, and it answers "are we affected
+by CVE-X?" for anything that was ever shipped. A self-test job first runs it on the SBOM of an old
+base image (python 3.12.0) and requires it to go red, so a green re-scan can't be a broken scanner.
+
 ## Gaps and next steps
 - **Secrets at runtime**: the API token comes from a Kubernetes Secret; in production, External
   Secrets Operator from a vault, and the Secret encrypted at rest (KMS).
@@ -47,5 +58,5 @@ job "to push it" would produce a different digest that no scanner has seen.
   auth and input handling on the write endpoints.
 - **Policy in the pipeline too**: run the Kyverno policies with the Kyverno CLI against the
   manifests in CI, so a policy violation fails the PR rather than the deploy.
-- **Continuous scanning**: re-scan deployed image digests daily (new CVEs appear after release),
-  e.g. Trivy Operator in the cluster.
+- **Continuous scanning in the cluster** (Trivy Operator): the daily re-scan below covers what was
+  published; an in-cluster scanner would also cover images that reached the cluster another way.
