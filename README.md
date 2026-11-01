@@ -51,6 +51,17 @@ typical flaw per gate in a throwaway copy and requires that gate to fail:
 - kube-linter flagged the PodDisruptionBudget for not setting `unhealthyPodEvictionPolicy`
   (a crash-looping pod could block node drains).
 
+**And it keeps checking after release.** A daily job ([`rescan.yml`](.github/workflows/rescan.yml),
+[`ci/96-rescan.sh`](ci/96-rescan.sh)) takes the newest image published from `main` and verifies its
+SBOM attestation. Only an SBOM signed by this pipeline's identity is trusted. It then scans that SBOM
+against today's vulnerability database, with no pull and no rebuild, and opens or updates an issue on
+new fixable HIGH/CRITICAL CVEs. First run (2026-11-01):
+
+| Step | Result |
+|---|---|
+| Self-test: SBOM of an old base image (python 3.12.0) | **14** fixable HIGH/CRITICAL found, as required |
+| Shipped image `notes-api:ac427a462b5d` | attestation verified (keyless, this workflow on `main`), 103 components, 0 fixable HIGH/CRITICAL today |
+
 **Runs on both CI systems, unchanged:** GitHub Actions, and Jenkins in my homelab (job defined
 as code, source from Gitea): build #2 passed all nine gates in about two minutes.
 
