@@ -8,6 +8,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch: # rebuild on a patched base image when the weekly re-scan finds a fixable CVE
 
 permissions:
   contents: read
