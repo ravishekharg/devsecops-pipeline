@@ -7,7 +7,10 @@ COPY app/requirements.txt .
 RUN pip install --no-cache-dir --require-hashes --prefix=/install -r requirements.txt
 
 FROM python:3.12-slim
-RUN pip uninstall -y pip setuptools wheel 2>/dev/null; \
+# Debian security fixes land before the official image is rebuilt; take them now, so the image gate
+# and the weekly re-scan only fail on vulnerabilities that have no fix yet.
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/* && \
+    pip uninstall -y pip setuptools wheel 2>/dev/null; \
     rm -rf /root/.cache && useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin app
 COPY --from=build /install /usr/local
 WORKDIR /app
