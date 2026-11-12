@@ -25,8 +25,9 @@ flaw() {  # flaw <case> <dir>: introduce the flaw for this case
       sed -i -e 's|^FROM python:3.12-slim$|FROM python:latest|' -e 's|^USER 10001$|USER root|' "$d/Dockerfile" ;;
     manifest)    # a privileged container that may run as root
       sed -i -e 's|allowPrivilegeEscalation: false|allowPrivilegeEscalation: true\n            privileged: true|' -e 's|runAsNonRoot: true|runAsNonRoot: false|' "$d/k8s/notes-api.yaml" ;;
-    image)       # an old base image (python 3.12.0, Oct 2023) with OS CVEs fixed since
-      sed -i 's|^FROM python:3.12-slim$|FROM python:3.12.0-slim|' "$d/Dockerfile" ;;
+    image)       # an old base image (python 3.12.0, Oct 2023) with OS CVEs fixed since, and no security updates
+      sed -i -e 's|^FROM python:3.12-slim$|FROM python:3.12.0-slim|' \
+             -e 's|apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/\* && ||' "$d/Dockerfile" ;;
     dast)        # the security-headers middleware removed
       sed -i 's|    response.headers.update(SECURITY_HEADERS)|    pass|' "$d/app/main.py" ;;
   esac

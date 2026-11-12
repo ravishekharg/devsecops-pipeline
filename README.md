@@ -36,7 +36,7 @@ typical flaw per gate in a throwaway copy and requires that gate to fail:
 | `requests==2.19.1` added | trivy: CVE-2018-18074 (HIGH, fixed in 2.20.0) |
 | `FROM python:latest`, `USER root` | hadolint: DL3007, DL3002 |
 | `privileged: true`, `runAsNonRoot: false` | kube-linter and trivy config |
-| Old base image (python 3.12.0) | trivy image: 89 fixable (76 HIGH, 13 CRITICAL) |
+| Old base image (python 3.12.0), security updates step removed | trivy image: 89 fixable (76 HIGH, 13 CRITICAL) |
 | Security-headers middleware removed | ZAP: FAIL on X-Content-Type-Options missing [10021] (its CSP and anti-clickjacking rules only fire on HTML responses; this API returns JSON) |
 | Unsigned build of the same app, or an image from another registry | Kyverno: rejected at admission |
 
